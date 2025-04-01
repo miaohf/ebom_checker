@@ -1,0 +1,11 @@
+# config/config.yaml
+vectorDB:
+  project: milvus
+  tenant: default
+  db_name: default
+  collection_name: ebom_collection
+  protocol: http
+  host: localhost
+  port: 19530
+  token: root:Milvus
+  dim: 1536
