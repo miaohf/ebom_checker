@@ -1,283 +1,195 @@
 import logging
-from typing import Dict, List, Any, Optional
-
+from typing import Dict, List, Any
 import yaml
-import pymilvus
-from pymilvus.client.types import ExtraList
-from db_config import config
+import psycopg2
+from psycopg2.extras import Json, DictCursor
+import numpy as np
 
 logger = logging.getLogger("pss_api")
-
 
 class VectorClassBase:
     """向量数据库基础类"""
     
     def __init__(self, config: Dict[str, Any]) -> None:
-        """初始化基础配置
-        
-        Args:
-            config: 配置字典
-        """
         self.tenant = config['tenant']
         self.database = config['db_name']
-        self.collection_name = config['collection_name']
+        self.table_name = config['table_name']
         self.host = config['host']
         self.port = config['port']
-        self.uri = f"{config['protocol']}://{self.host}:{self.port}"
-        self.token = config['token']
+        self.user = config['user']
+        self.password = config['password']
         self.dim = config['dim']
 
-
-class Milvus(VectorClassBase):
-    """Milvus向量数据库实现类"""
+class PostgreSQL(VectorClassBase):
+    """PostgreSQL向量数据库实现类"""
 
     GET_OUTPUT_FIELDS = [
         "documents",
-        "bomNodeCode",
-        "materialCode",
-        "effectiveDate",
-        "pss",
-        "ebom_data"
-    ]
-
-    SEARCH_OUTPUT_FIELDS = [
-        "documents",
-        "bomNodeCode",
-        "materialCode",
-        "effectiveDate",
+        "bom_node_code",
+        "material_code",
+        "effective_date",
         "pss",
         "ebom_data"
     ]
 
     def __init__(self, config: Dict[str, Any]) -> None:
-        """初始化Milvus客户端
-        
-        Args:
-            config: 配置字典
-        """
+        """初始化PostgreSQL连接"""
         super().__init__(config)
-        self.client = pymilvus.MilvusClient(
-            uri=self.uri,
-            token=self.token,
-            db_name=self.database
+        self.conn = psycopg2.connect(
+            host=self.host,
+            port=self.port,
+            database=self.database,
+            user=self.user,
+            password=self.password
         )
-        logger.debug("Client initialized: %s", self.client)
-        self.get_or_create_collection()
-        logger.debug("Collection initialized: %s", self.collection_name)
-        self.client.load_collection(collection_name=self.collection_name)
-        logger.debug("Collection loaded: %s", self.collection_name)
+        self.get_or_create_table()
 
-    def get_or_create_collection(self) -> None:
-        """获取或创建集合"""
-        logger.debug("Connecting to Milvus server: %s", self.uri)
-        res = self.client.has_collection(self.collection_name)
-        logger.debug("Has collection result: %s", res)
-
-        if res:
-            logger.info("Collection %s already exists", self.collection_name)
-        else:
-            logger.info("Collection %s not found, creating it", self.collection_name)
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                schema=self.schema(),
-                num_shards=1,
-                consistency_level="Strong"
+    def schema(self) -> str:
+        """定义表结构"""
+        return f"""
+            CREATE TABLE IF NOT EXISTS {self.table_name} (
+                id VARCHAR(128) PRIMARY KEY,
+                documents TEXT,
+                embeddings vector({self.dim}),
+                bom_node_code VARCHAR(128),
+                material_code VARCHAR(64),
+                effective_date VARCHAR(64),
+                pss VARCHAR(64),
+                ebom_data JSONB
             )
-            self.init_index()
-
-    def schema(self) -> pymilvus.CollectionSchema:
-        """定义集合schema"""
-        fields = [
-            pymilvus.FieldSchema(
-                name="ids",
-                dtype=pymilvus.DataType.VARCHAR,
-                is_primary=True,
-                auto_id=False,
-                max_length=128
-            ),
-            pymilvus.FieldSchema(
-                name="documents",
-                max_length=65530,
-                dtype=pymilvus.DataType.VARCHAR
-            ),
-            pymilvus.FieldSchema(
-                name="embeddings",
-                dtype=pymilvus.DataType.FLOAT_VECTOR,
-                dim=self.dim
-            ),
-            pymilvus.FieldSchema(
-                name="bomNodeCode",
-                max_length=128,
-                dtype=pymilvus.DataType.VARCHAR
-            ),
-            pymilvus.FieldSchema(
-                name="materialCode",
-                max_length=64,
-                dtype=pymilvus.DataType.VARCHAR
-            ),
-            pymilvus.FieldSchema(
-                name="effectiveDate",
-                max_length=64,
-                dtype=pymilvus.DataType.VARCHAR
-            ),
-            pymilvus.FieldSchema(
-                name="pss",
-                max_length=64,
-                dtype=pymilvus.DataType.VARCHAR
-            ),
-            pymilvus.FieldSchema(
-                name="ebom_data",
-                dtype=pymilvus.DataType.JSON
-            )
-        ]
-        return pymilvus.CollectionSchema(
-            fields=fields,
-            description="ebom pss collection"
-        )
+        """
 
     def init_index(self) -> None:
         """初始化索引"""
         logger.debug("Initializing index")
-        index_params = self.client.prepare_index_params()
-        index_params.add_index(
-            field_name="ids",
-            index_type="INVERTED"
-        )
-        index_params.add_index(
-            field_name="embeddings",
-            index_type="HNSW",
-            metric_type="COSINE",
-            params={
-                "M": 32,
-                "efConstruction": 256
-            }
-        )
-        self.client.create_index(
-            self.collection_name,
-            index_params=index_params
-        )
+        with self.conn.cursor() as cur:
+            # 创建向量索引
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_{self.table_name}_embeddings 
+                ON {self.table_name} 
+                USING ivfflat (embeddings vector_cosine_ops)
+                WITH (lists = 100);
+            """)
+            
+            # 创建其他字段的索引
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_{self.table_name}_pss 
+                ON {self.table_name} (pss);
+            """)
+            
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_{self.table_name}_material_code 
+                ON {self.table_name} (material_code);
+            """)
+            
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_{self.table_name}_bom_node_code 
+                ON {self.table_name} (bom_node_code);
+            """)
+            
+            self.conn.commit()
         logger.debug("Index creation completed")
 
-    def milvus_get_response2result(self, response: Any) -> Dict[str, Any]:
-        """转换Milvus响应为标准结果格式"""
-        logger.debug("Processing Milvus response to result: %s", response)
-        res_data = {}
-
-        if isinstance(response, ExtraList) and response:
-            res_data = list(response)[0]
-            logger.debug("Milvus response ExtraList: %s", res_data)
-        elif isinstance(response, dict):
-            logger.debug("Milvus response dict: %s", res_data)
-            res_data = response
-        else:
-            return {}
-
-        res_data['metadatas'] = {
-            key: res_data[key] for key in [
-                "bomNodeCode",
-                "materialCode",
-                "effectiveDate",
-                "pss",
-                "ebom_data"
-            ]
-        }
-
-        return {
-            key: res_data[key] for key in [
-                "ids",
-                "documents",
-                "metadatas"
-            ]
-        }
-
-    def get(self, ids: str) -> Dict[str, Any]:
-        """通过ID获取数据"""
-        response = self.client.get(
-            collection_name=self.collection_name,
-            ids=[ids],
-            output_fields=self.GET_OUTPUT_FIELDS
-        )
-        logger.debug("Milvus get request for ids: %s", [ids])
-        logger.debug("Milvus get response: %s", response)
-        result = self.milvus_get_response2result(response=response)
-        logger.debug("Milvus get result: %s", result)
-        return result
-
-    def query(self, pss_code: str) -> Dict[str, Any]:
-        """通过PSS代码查询数据"""
-        response = self.client.query(
-            collection_name=self.collection_name,
-            filter=f"pss == '{pss_code}'",
-            output_fields=self.GET_OUTPUT_FIELDS
-        )
-        logger.debug("Milvus query response: %s", response)
-        result = self.milvus_query_response2result(response=response)
-        logger.debug("Milvus query result: %s", result)
-        return result
+    def get_or_create_table(self) -> None:
+        """获取或创建表"""
+        logger.debug("Connecting to PostgreSQL server: %s", self.uri)
+        with self.conn.cursor() as cur:
+            # 创建pgvector扩展
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            
+            # 创建表
+            cur.execute(self.schema())
+            
+            # 初始化索引
+            self.init_index()
 
     def insert(self, ids: str, documents: str, embeddings: List[float],
               metadatas: List[Dict[str, Any]]) -> Dict[str, Any]:
         """插入数据"""
-        logger.debug("Inserting data with ids: %s", ids)
         try:
-            response = self.client.insert(
-                collection_name=self.collection_name,
-                data={
-                    "ids": ids,
-                    "documents": documents,
-                    "embeddings": embeddings,
-                    **metadatas[0]
-                }
-            )
-            logger.debug("Insert response: %s", response)
-
-            if response['insert_count'] == 1 and response['ids'][0] == ids:
+            with self.conn.cursor() as cur:
+                cur.execute(f"""
+                    INSERT INTO {self.table_name}
+                    (id, documents, embeddings, bom_node_code, material_code, 
+                     effective_date, pss, ebom_data)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    ids,
+                    documents,
+                    embeddings,
+                    metadatas[0]['bomNodeCode'],
+                    metadatas[0]['materialCode'],
+                    metadatas[0]['effectiveDate'],
+                    metadatas[0]['pss'],
+                    Json(metadatas[0]['ebom_data'])
+                ))
+                self.conn.commit()
                 return {
                     'ids': ids,
                     'documents': documents,
-                    "metadatas": metadatas[0]
+                    'metadatas': metadatas[0]
                 }
-            
-            logger.error("Insert error: %s", response)
-            return f"Insert error: {response}"
         except Exception as e:
             logger.error("Insert error: %s", e)
             return f"Insert error: {e}"
 
-    def delete(self, ids: str) -> Dict[str, Any]:
-        """删除数据"""
-        response = self.client.delete(
-            collection_name=self.collection_name,
-            ids=ids
-        )
-        logger.debug("Delete response: %s", response)
-        return response
-
     def search(self, query_embeddings: List[float], n_results: int,
               where: str = "") -> Dict[str, Any]:
         """搜索数据"""
-        logger.debug("Searching with embeddings: %s", query_embeddings)
-        expr = ""
-        if where:
-            pairs = [f'{key} == "{value}"' for key, value in where.items()]
-            expr = " and ".join(pairs)
+        with self.conn.cursor(cursor_factory=DictCursor) as cur:
+            where_clause = ""
+            if where:
+                conditions = [f"{k} = %s" for k in where.keys()]
+                where_clause = "WHERE " + " AND ".join(conditions)
+            
+            query = f"""
+                SELECT *, embeddings <=> %s as distance
+                FROM {self.table_name}
+                {where_clause}
+                ORDER BY embeddings <=> %s
+                LIMIT %s
+            """
+            
+            params = [query_embeddings]
+            if where:
+                params.extend(where.values())
+            params.append(query_embeddings)
+            params.append(n_results)
+            
+            cur.execute(query, params)
+            results = cur.fetchall()
+            
+            return self._format_search_results(results)
 
-        search_params = {
-            "metric_type": "COSINE",
-            "params": {"nprobe": 10}
-        }
+    def get(self, ids: str) -> Dict[str, Any]:
+        """通过ID获取数据"""
+        with self.conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(f"""
+                SELECT * FROM {self.table_name}
+                WHERE id = %s
+            """, (ids,))
+            result = cur.fetchone()
+            return self._format_get_result(result) if result else {}
 
-        response = self.client.search(
-            collection_name=self.collection_name,
-            data=query_embeddings,
-            search_params=search_params,
-            limit=n_results,
-            filter=expr,
-            output_fields=self.SEARCH_OUTPUT_FIELDS
-        )
-        logger.debug("Search response: %s", response)
-        return self.milvus_search_response2result(response=response)
+    def delete(self, ids: str) -> Dict[str, Any]:
+        """删除数据"""
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                DELETE FROM {self.table_name}
+                WHERE id = %s
+            """, (ids,))
+            self.conn.commit()
+            return {"deleted": ids}
 
+    def query(self, pss_code: str) -> Dict[str, Any]:
+        """通过PSS代码查询数据"""
+        with self.conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(f"""
+                SELECT * FROM {self.table_name}
+                WHERE pss = %s
+            """, (pss_code,))
+            results = cur.fetchall()
+            return self._format_query_results(results)
 
 class VectorDB(VectorClassBase):
     """向量数据库统一接口类"""
@@ -290,7 +202,7 @@ class VectorDB(VectorClassBase):
             self.config = config_data['vectorDB']
 
             db_mapping = {
-                'milvus': Milvus
+                'postgresql': PostgreSQL  # 改为PostgreSQL
             }
 
             self.vectordb_class = db_mapping.get(self.config['project'])
@@ -301,7 +213,7 @@ class VectorDB(VectorClassBase):
             logger.info("Initializing %s vector database", self.config['project'])
             self.vectordb = self.vectordb_class(config=self.config)
             super().__init__(config=self.config)
-            self.collection_name = self.vectordb.collection_name
+            self.table_name = self.vectordb.table_name
 
         except FileNotFoundError as e:
             logger.error("Config file not found: %s", e)
