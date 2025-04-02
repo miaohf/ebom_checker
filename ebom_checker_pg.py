@@ -13,7 +13,7 @@ Base = declarative_base()
 
 class VectorTable(Base):
     """向量表ORM模型"""
-    __tablename__ = 'vector_store'
+    __tablename__ = 'ebom_collection'  # 这里应该从配置中获取
 
     id = Column(String(128), primary_key=True)
     documents = Column(String)
@@ -26,9 +26,9 @@ class VectorTable(Base):
 
     # 索引定义
     __table_args__ = (
-        Index('idx_vector_store_pss', 'pss'),
-        Index('idx_vector_store_material_code', 'material_code'),
-        Index('idx_vector_store_bom_node_code', 'bom_node_code'),
+        Index('idx_ebom_collection_pss', 'pss'),
+        Index('idx_ebom_collection_material_code', 'material_code'),
+        Index('idx_ebom_collection_bom_node_code', 'bom_node_code'),
     )
 
 class VectorClassBase:
@@ -70,8 +70,8 @@ class PostgreSQL(VectorClassBase):
             
             # 创建向量索引
             conn.execute(text(f"""
-                CREATE INDEX IF NOT EXISTS idx_{self.table_name}_embeddings 
-                ON {self.table_name} 
+                CREATE INDEX IF NOT EXISTS idx_ebom_collection_embeddings 
+                ON ebom_collection 
                 USING ivfflat (embeddings vector_cosine_ops)
                 WITH (lists = 100);
             """))
@@ -219,7 +219,7 @@ class VectorDB(VectorClassBase):
             logger.info("Initializing %s vector database", self.config['project'])
             self.vectordb = self.vectordb_class(config=self.config)
             super().__init__(config=self.config)
-            self.table_name = self.vectordb.table_name
+            self.collection_name = self.vectordb.collection_name  # 保持一致使用collection_name
 
         except FileNotFoundError as e:
             logger.error("Config file not found: %s", e)

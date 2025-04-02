@@ -1,1 +1,1 @@
-pip install sqlalchemy psycopg2-binary sqlalchemy-vector
+pip install sqlalchemy psycopg2-binary
