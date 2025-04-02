@@ -1,0 +1,9 @@
+vectorDB:
+  project: 'postgresql'
+  host: 'localhost'
+  port: 5432
+  db_name: 'your_db'
+  user: 'your_user'
+  password: 'your_password'
+  table_name: 'vector_store'
+  dim: 1536
