@@ -5,5 +5,5 @@ vectorDB:
   db_name: 'your_db'
   user: 'your_user'
   password: 'your_password'
-  table_name: 'ebom_collection'  # 修改为与原代码一致
-  dim: 1536
+  table_name: 'ebom_collection'
+  dim: 1792
